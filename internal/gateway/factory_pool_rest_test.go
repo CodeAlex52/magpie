@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"testing"
@@ -53,8 +54,8 @@ func TestFactoryStandardOutLeavesCore(t *testing.T) {
 		}},
 	} {
 		t.Run(way.name, func(t *testing.T) {
-			old := allowances
-			defer func() { allowances = old }()
+			old, oldAwait := allowances, awaitAllowance
+			defer func() { allowances, awaitAllowance = old, oldAwait }()
 			fresh(t)
 			al := map[string]provider.Allowance{"a@x.com": way.of(100, 1), "b@x.com": way.of(100, 1)}
 			allowances = func(string) map[string]provider.Allowance { return al }
@@ -123,6 +124,30 @@ func TestFactoryStandardOutLeavesCore(t *testing.T) {
 			if _, ok := restingOf(acct("a@x.com", "glm-5.3")); !ok {
 				t.Fatal("a payment 402 leaves the account's other models in")
 			}
+
+			// windows never read: the refusal can't be told from the
+			// account's until a reading lands, so the rest waits for one
+			// and then rests Opus alone when Standard's pool is scoped
+			// away from Droid Core (#2036)
+			fresh(t)
+			al = nil
+			awaited := false
+			awaitAllowance = func(_ context.Context, agent, user string) bool {
+				awaited = true
+				al = map[string]provider.Allowance{user: way.of(100, 1)}
+				return true
+			}
+			opus = acct("a@x.com", "claude-opus-5-5")
+			r = s.restAfter(opus, 402, http.Header{}, []byte(factoryStandardOut))
+			if !awaited {
+				t.Fatal("Standard used up before the windows were read did not wait for a reading")
+			}
+			if r.Why != failQuota || r.Key != opus.restID() {
+				t.Fatalf("Standard used up, windows read late, rests %+v, want Opus alone", r)
+			}
+			if _, ok := restingOf(acct("a@x.com", "glm-5.3")); ok {
+				t.Fatal("GLM-5.3 rests although the reading scopes Standard away from Droid Core")
+			}
 		})
 	}
 }
@@ -167,10 +192,13 @@ func TestResetsInWords(t *testing.T) {
 		}
 	}
 
-	old := allowances
-	defer func() { allowances = old }()
+	old, oldAwait := allowances, awaitAllowance
+	defer func() { allowances, awaitAllowance = old, oldAwait }()
 	fresh(t)
 	allowances = func(string) map[string]provider.Allowance { return nil }
+	// the reading never lands: the wait ends with the windows still
+	// unknown, and the account's rest stands (#2036)
+	awaitAllowance = func(context.Context, string, string) bool { return false }
 	c := candidate{p: provider.Provider{ID: "factory", Account: &provider.Account{Agent: "factory", User: "a@x.com"}}, model: "claude-opus-5-5", rest: "factory"}
 	r := (&Server{}).restAfter(c, 402, http.Header{}, []byte(factoryStandardOut))
 	if d := time.Until(r.Until); r.Why != failQuota || r.By != "resets" || d < 18*time.Minute || d > 19*time.Minute {

@@ -13,6 +13,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -120,6 +121,12 @@ const (
 	// (Unrest) for a user whose appeal went through
 	restrictedRest = 2 * time.Hour
 )
+
+// allowanceWait is how long a quota rest waits for a reading when the
+// account's windows were never read: a start's first refusal is worth one
+// read rather than resting the account's other pools with it (#2036), as
+// a spent reset is waited for (AwaitAllowance).
+const allowanceWait = 10 * time.Second
 
 var (
 	// creditWords: the account or key has no money left.
@@ -424,6 +431,9 @@ func init() { provider.OnRenewed(renewed) }
 // staleAllowance is provider.StaleAllowance, swapped in tests.
 var staleAllowance = provider.StaleAllowance
 
+// awaitAllowance is provider.AwaitAllowance, swapped in tests.
+var awaitAllowance = provider.AwaitAllowance
+
 // keyAllowance and staleKeyAllowance are provider.KeyAllowance and
 // provider.StaleKeyAllowance, swapped in tests.
 var (
@@ -587,6 +597,16 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	now := time.Now()
 	d := fallbackCooldown
 	why := failureOf(c, status, body)
+	// An account whose windows were never read — a start, or a reading
+	// that failed — can't tell the model's pool from the account's: wait
+	// briefly for a reading, as a spent reset is waited for, so a scoped
+	// pool rests the model alone (#2036). Windows still unknown after the
+	// wait keep the account's rest, as before.
+	if why == failQuota && c.p.Account != nil && len(allowances(c.p.Account.UsageAgent())[c.p.Account.User]) == 0 {
+		wait, done := context.WithTimeout(context.Background(), allowanceWait)
+		awaitAllowance(wait, c.p.Account.UsageAgent(), c.p.Account.User)
+		done()
+	}
 	// read before the allowance is asked again below: out of a pool that
 	// counts some models only, the account's others are still in theirs
 	// (Cursor's Auto with Other Models used up)

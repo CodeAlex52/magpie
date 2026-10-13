@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,6 +101,10 @@ func isolatedTests(m *testing.M) (int, error) {
 	// key would, in the background (a plan key's windows, #1016), and a
 	// plugin host's first start fetched models.dev
 	testenv.Offline()
+	// and no test waits on a reading: the wait would ask a test's fake
+	// upstream and count its request (a codex read's own, #2036), so the
+	// wait ends with the windows still unknown unless a test sets its own
+	awaitAllowance = func(context.Context, string, string) bool { return false }
 	return m.Run(), nil
 }
 
